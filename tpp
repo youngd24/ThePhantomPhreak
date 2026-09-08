@@ -10,8 +10,8 @@ exec expect -- "$0" ${1+"$@"}
 #
 # $Id: tpp,v 1.7 1998/09/06 03:48:30 youngd Exp youngd $
 #
-# usage: tpp [-s num]... <prefix> <start> <end> [device]
-#   e.g. tpp -s 3612 -s 3613 555 3610 3614 /dev/cua1
+# usage: tpp [-s num]... [-r] <prefix> <start> <end> [device]
+#   e.g. tpp -s 3612 -s 3613 -r 555 3610 3614 /dev/cua1
 #
 # =============================================================================
 
@@ -23,6 +23,7 @@ regexp {Revision: ([^ ]+)} $revision -> version
 
 # ---- argument parsing (manual - no cmdline package in Tcl 7.3) ----
 set skip_list {}
+set random_scan 0
 set args {}
 set i 0
 
@@ -35,6 +36,8 @@ while {$i < $argc} {
             exit 1
         }
         lappend skip_list [lindex $argv $i]
+    } elseif {$arg == "-r"} {
+        set random_scan 1
     } else {
         lappend args $arg
     }
@@ -43,9 +46,10 @@ while {$i < $argc} {
 
 if {[llength $args] < 3} {
     puts "$pgmname v$version \[$pgmauthor\]"
-    puts "usage: tpp \[-s num\]... <prefix> <start> <end> \[device\]"
+    puts "usage: tpp \[-s num\]... \[-r\] <prefix> <start> <end> \[device\]"
     puts "       device defaults to /dev/cua1"
     puts "       -s can be specified multiple times"
+    puts "       -r dials the range in a scrambled, not sequential, order"
     exit 1
 }
 
@@ -66,33 +70,67 @@ puts {
 }
 
 # ---- output helpers ----
+# general log message
 proc tpp_log {msg} {
-    puts "\[TPP\]: $msg"
+    puts "\[TPP:GENERAL\]: $msg"
 }
+
+# expect_out is not a Tcl keyword - it's an ordinary global array that
+# Expect's own `expect` command writes to by convention whenever it
+# matches something (expect_out(buffer) holds everything consumed up
+# to and including the match). `global expect_out` below just makes
+# that same array visible inside these procs; nothing special about
+# the `global` call itself.
+
+# used when we send something TO the modem
 proc modem_out {cmd {terminator "\r"}} {
     global expect_out
-    puts "\[MODEM OUT\]: $cmd"
+    puts "\[TPP:MODEM OUT\]: $cmd"
     catch {set expect_out(buffer) ""}
     send "$cmd$terminator"
 }
+
+# used when we get something FROM the modem
 proc modem_in {} {
     global expect_out
     set txt [string trim $expect_out(buffer)]
     foreach line [split $txt "\r\n"] {
         set line [string trim $line]
         if {$line != ""} {
-            puts "\[MODEM IN\]: $line"
+            puts "\[TPP:MODEM IN\]: $line"
         }
     }
 }
 
+# ---- helper for -r: walk the range in a scrambled order instead of
+# sequentially. No rand()/clock in this Tcl build, so this isn't a
+# real PRNG - it steps through 0..count-1 by a stride that's coprime
+# with count, which is guaranteed to visit every index exactly once,
+# just not in order. pid seeds where the walk starts.
+proc tpp_gcd {a b} {
+    while {$b != 0} {
+        set t [expr {$a % $b}]
+        set a $b
+        set b $t
+    }
+    return $a
+}
+
 # -------------------------
+# variables
 set prefix     [lindex $args 0]
 set start      [lindex $args 1]
 set end        [lindex $args 2]
 set modem_dev  [expr {[llength $args] >= 4 ? [lindex $args 3] : "/dev/cua1"}]
 set cmd_timeout  5
 set dial_timeout 60
+
+# timeout is another Expect convention, not a keyword: it's a plain
+# global variable that `expect` reads (if a call doesn't pass its own
+# -timeout) to decide how many seconds to wait for a match before
+# giving up. This `set` just assigns it like any other variable - the
+# dial loop's expect overrides it per-call with -timeout $dial_timeout,
+# every other expect in this script falls back to this global.
 set timeout $cmd_timeout
 set init_string "ATX4E0Q0V1S7=45"
 set completion_messages {
@@ -100,6 +138,15 @@ set completion_messages {
     "Scan complete, why are you still here?"
     "Scan complete, you're out of Jolt."
 }
+
+# -------------------------
+
+# unlike timeout/expect_out, log_user is a real Expect command, not a
+# variable convention. It controls Expect's own automatic echo of the
+# spawned process's raw I/O to stdout (on by default). We turn it off
+# here because the script already logs everything itself via
+# modem_out/modem_in/tpp_log - without this, the raw modem bytes would
+# print a second time alongside our formatted [TPP:...] lines.
 log_user 0
 
 tpp_log "tpp v$version starting..."
@@ -152,7 +199,57 @@ expect {
 
 # start scan
 tpp_log "scanning [format %s%04d $prefix $start] through [format %s%04d $prefix $end]"
-for {set n $start} {$n <= $end} {incr n} {
+
+# ---- -r setup: scramble the dial order without a real RNG ----
+# scan_count is how many numbers are in range; the loop below always
+# dials exactly that many, once each, whether -r is on or not.
+#
+# The trick: instead of picking random numbers (which risks repeats
+# or misses without a real RNG), walk the range 0..scan_count-1 by a
+# fixed stride (scan_step) that shares no common factor with
+# scan_count. Modular arithmetic guarantees that stepping by a value
+# coprime with the modulus visits every residue 0..scan_count-1
+# exactly once before repeating - so every number in range still
+# gets dialed, just not in ascending order.
+#
+# scan_step: start the search around the midpoint of the range (a
+# small step like 1 or 2 would barely scramble anything) and count
+# up until tpp_gcd finds one that's coprime with scan_count. Falls
+# back to 1 (plain sequential) in the unlikely case nothing smaller
+# than scan_count qualifies.
+#
+# scan_idx: where the walk starts. pid is the only source of
+# variation this old Tcl build has (no rand()/clock), so each run
+# starts at a different offset into the same stride pattern.
+set scan_count [expr {$end - $start + 1}]
+set scan_step 1
+set scan_idx 0
+if {$random_scan} {
+    set scan_step [expr {$scan_count / 2 + 1}]
+    while {[tpp_gcd $scan_step $scan_count] != 1} {
+        incr scan_step
+        if {$scan_step >= $scan_count} {
+            set scan_step 1
+            break
+        }
+    }
+    set scan_idx [expr {[pid] % $scan_count}]
+    tpp_log "randomizing dial order (step=$scan_step)"
+}
+
+# main dial loop - count just tracks how many of scan_count numbers
+# have been dialed so far; n (the actual number offset) comes either
+# sequentially (count) or via the scrambled walk (scan_idx), which
+# is advanced mod scan_count each time so it wraps to cover the
+# whole range without ever repeating a number.
+for {set count 0} {$count < $scan_count} {incr count} {
+    if {$random_scan} {
+        set n [expr {$start + $scan_idx}]
+        set scan_idx [expr {($scan_idx + $scan_step) % $scan_count}]
+    } else {
+        set n [expr {$start + $count}]
+    }
+
     if {[lsearch -exact $skip_list $n] >= 0} {
         tpp_log "[format "%s%04d" $prefix $n]: skipped"
         continue
