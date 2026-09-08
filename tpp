@@ -8,14 +8,14 @@ exec expect -- "$0" ${1+"$@"}
 # rather than through pppd/dip, since we just want AT-command scanning,
 # not an actual SLIP/PPP session. Defaults to /dev/cua1.
 #
-# $Id: tpp,v 1.6 1998/09/04 09:15:38 youngd Exp youngd $
+# $Id: tpp,v 1.7 1998/09/06 03:48:30 youngd Exp youngd $
 #
 # usage: tpp [-s num]... <prefix> <start> <end> [device]
 #   e.g. tpp -s 3612 -s 3613 555 3610 3614 /dev/cua1
 #
 # =============================================================================
 
-set revision {$Revision: 1.6 $}
+set revision {$Revision: 1.7 $}
 set version {}
 set pgmname "THE PHANTOM PHREAK"
 set pgmauthor "c1ph3rpunk"
@@ -95,6 +95,11 @@ set cmd_timeout  5
 set dial_timeout 60
 set timeout $cmd_timeout
 set init_string "ATX4E0Q0V1S7=45"
+set completion_messages {
+    "Scan complete, go buy some Mountain Dew."
+    "Scan complete, why are you still here?"
+    "Scan complete, you're out of Jolt."
+}
 log_user 0
 
 tpp_log "tpp v$version starting..."
@@ -107,7 +112,7 @@ if {[llength $skip_list] > 0} {
 # (older stty doesn't understand GNU's "-F device" syntax; redirect
 # into the device instead to target it. clocal keeps the fd alive
 # across real DCD drops on hangup/disconnect.)
-exec stty 19200 cs8 -cstopb -parenb -echo raw clocal < $modem_dev
+exec stty 9600 cs8 -cstopb -parenb -echo raw clocal < $modem_dev
 
 # open the modem device
 tpp_log "Opening modem $modem_dev"
@@ -188,4 +193,11 @@ for {set n $start} {$n <= $end} {incr n} {
 }
 
 catch {close $fd}
-tpp_log "scan complete, go buy some Mountain Dew"
+
+# print a random closing message
+# (no rand()/srand() expr functions and no clock command on this old
+# Tcl build - pid is the only source of variation available, but it's
+# enough to rotate through the list run to run)
+set idx [expr {[pid] % [llength $completion_messages]}]
+set msg [lindex $completion_messages $idx]
+tpp_log $msg
