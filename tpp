@@ -8,14 +8,14 @@ exec expect -- "$0" ${1+"$@"}
 # rather than through pppd/dip, since we just want AT-command scanning,
 # not an actual SLIP/PPP session. Defaults to /dev/cua1.
 #
-# $Id: tpp,v 1.7 1998/09/06 03:48:30 youngd Exp youngd $
+# $Id: tpp,v 1.8 1998/09/07 02:24:16 youngd Exp youngd $
 #
 # usage: tpp [-s num]... [-r] <prefix> <start> <end> [device]
 #   e.g. tpp -s 3612 -s 3613 -r 555 3610 3614 /dev/cua1
 #
 # =============================================================================
 
-set revision {$Revision: 1.7 $}
+set revision {$Revision: 1.8 $}
 set version {}
 set pgmname "THE PHANTOM PHREAK"
 set pgmauthor "c1ph3rpunk"
